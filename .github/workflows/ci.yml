@@ -1,0 +1,17 @@
+name: CI
+
+# Runs the same gate as release.yml's pre-build check, but on every push to
+# master and every pull request (including from forks) - PRs are how
+# anyone other than the repo owner can ever propose a change, so this is
+# what gives a reviewer a green/red signal before reading the diff by hand.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml

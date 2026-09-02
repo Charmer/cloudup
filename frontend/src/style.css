@@ -1,0 +1,235 @@
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --border: #e0e2e7;
+  --text: #1c1e21;
+  --text-muted: #6b7280;
+  --accent: #2f6fed;
+  --accent-contrast: #ffffff;
+  --danger: #d9364b;
+  --success: #1a9e5c;
+  --warn: #b8860b;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1, h2, h3 {
+  margin-top: 0;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.4rem 0.85rem;
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input, select {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+th {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+.field-row label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.checkbox-line {
+  display: block;
+  font-size: 0.9rem !important;
+  color: var(--text) !important;
+  margin-top: 0.35rem;
+}
+/* A visual break between one setting/field and the next - without this,
+   a card with several fields in a row (Settings -> App's seven, some
+   provider forms in Connections) reads as one undifferentiated block and
+   a checkbox setting in particular gets lost among plain text inputs.
+   The adjacent-sibling selector only fires between two *consecutive*
+   field-rows, so it never adds a stray line before the first field or
+   after something else (a hint paragraph, a conditional banner). */
+.field-row + .field-row {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.error-banner {
+  background: #fdecee;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  padding: 0.6rem 0.9rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.warning-banner {
+  background: #fdf6e3;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  padding: 0.6rem 0.9rem;
+  border-radius: 6px;
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+}
+.warning-banner a {
+  color: inherit;
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.badge.success { background: #e5f7ee; color: var(--success); }
+.badge.error { background: #fdecee; color: var(--danger); }
+.badge.cancelled { background: #f1f2f4; color: var(--text-muted); }
+.badge.uploading, .badge.queued { background: #eaf1fe; color: var(--accent); }
+.badge.ok { background: #e5f7ee; color: var(--success); }
+.badge.missing, .badge.mismatch { background: #fdecee; color: var(--danger); }
+.badge.unverifiable { background: #fdf6e3; color: var(--warn); }
+.badge.watching { background: #e5f7ee; color: var(--success); }
+.badge.disabled { background: #f1f2f4; color: var(--text-muted); }
+.badge a { color: inherit; text-decoration: underline; }
+
+.progress-track {
+  width: 100%;
+  height: 6px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.oauth-guide {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+}
+.oauth-guide summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.oauth-guide ol,
+.oauth-guide ul {
+  margin: 0.5rem 0 0.25rem;
+  padding-left: 1.25rem;
+}
+.oauth-guide li {
+  margin-bottom: 0.4rem;
+}
+.oauth-guide code {
+  background: var(--surface-alt, rgba(127, 127, 127, 0.15));
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+}
+
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  text-align: center;
+  margin-bottom: 0.75rem;
+  transition: border-color 0.15s, background 0.15s;
+}
+.drop-zone.active {
+  border-color: var(--accent);
+  background: #eaf1fe;
+}
+
+.subtabs {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.subtab {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 0.5rem 0.1rem;
+  border-bottom: 2px solid transparent;
+}
+.subtab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}

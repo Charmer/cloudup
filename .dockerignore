@@ -1,0 +1,10 @@
+.git
+.github
+frontend/node_modules
+frontend/dist
+dist
+*.exe
+*.test
+.claude
+.vscode
+docker-compose.yml

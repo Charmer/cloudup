@@ -1,0 +1,1077 @@
+openapi: 3.0.3
+info:
+  title: cloudup REST API
+  description: >
+    Local REST API for cloudup, a parallel-upload manager for cloud storage
+    (Google Drive, S3 and S3-compatible, WebDAV/Yandex.Disk). Runs as a
+    local server (see cmd/server); any frontend, including the reference
+    Vue app, talks to it over this API. Progress and queue state are
+    polled, not pushed - see the /tasks endpoints.
+  version: "1.0"
+servers:
+  - url: http://127.0.0.1:3000
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+
+  /api/v1/provider-types:
+    get:
+      summary: List registered provider types
+      description: >
+        requiresOAuth marks the types whose connections additionally need an
+        interactive authorization step (see
+        /api/v1/connections/{id}/oauth/authorize) before they can be used -
+        so a client never has to hardcode which types those are.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderType"
+
+  /api/v1/provider-types/{type}/schema:
+    get:
+      summary: Connection form fields for a provider type
+      description: >
+        Used to render an "add connection" form generically, without
+        hardcoding a form per provider type - mirrors
+        internal/provider.ConfigSchema.
+      parameters:
+        - $ref: "#/components/parameters/providerType"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FieldSpec"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/connections:
+    get:
+      summary: List connections
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Connection"
+    post:
+      summary: Create a connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectionRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Connection"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/connections/{id}:
+    get:
+      summary: Get a connection
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Connection"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      summary: Update a connection's display name and fields
+      description: >
+        secrets, if present, only overwrites the given keys - existing
+        secret fields not mentioned are left untouched. providerType and
+        createdAt are immutable.
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectionRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Connection"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete a connection
+      description: >
+        Also best-effort deletes every secret field (keychain entries) this
+        connection owns. Refuses to delete a connection with a pending or
+        in-flight upload (409) - cancel those first via
+        POST /api/v1/connections/{id}/cancel-all - or with an enabled watch
+        rule still pointing at it (409) - disable or delete that rule
+        first via PUT/DELETE /api/v1/watches/{id}.
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The connection has pending or in-flight uploads.
+
+  /api/v1/connections/{id}/test:
+    post:
+      summary: Test a connection
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "200":
+          description: >
+            Always 200 - inspect body.ok for the actual result, since a
+            failed test is an expected outcome, not a server error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  error:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/connections/{id}/uploads:
+    post:
+      summary: Upload a file through this connection
+      description: >
+        Spools the uploaded file to local disk and enqueues it on
+        internal/queue.Manager (FIFO per connection, parallel across
+        connections, automatic retry). Poll /api/v1/tasks/{taskId} for
+        progress.
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                remotePath:
+                  type: string
+                  description: Defaults to the uploaded file's name if omitted.
+              required:
+                - file
+      responses:
+        "202":
+          description: Accepted - queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  taskId:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/tasks:
+    get:
+      summary: List known upload tasks (poll for progress)
+      parameters:
+        - name: connectionId
+          in: query
+          description: Filter to a single connection's tasks.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+
+  /api/v1/tasks/{id}:
+    get:
+      summary: Get a single task's current state
+      parameters:
+        - $ref: "#/components/parameters/taskId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/tasks/{id}/cancel:
+    post:
+      summary: Cancel a task, pending or in flight
+      parameters:
+        - $ref: "#/components/parameters/taskId"
+      responses:
+        "204":
+          description: Cancel requested
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/connections/{id}/pause:
+    post:
+      summary: Pause a connection's upload queue
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "204":
+          description: Paused
+
+  /api/v1/connections/{id}/resume:
+    post:
+      summary: Resume a connection's upload queue
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "204":
+          description: Resumed
+
+  /api/v1/connections/{id}/cancel-all:
+    post:
+      summary: Cancel every pending and in-flight task for a connection
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "204":
+          description: Cancel requested
+
+  /api/v1/connections/{id}/oauth/authorize:
+    post:
+      summary: Start the interactive OAuth2 consent flow for this connection
+      description: >
+        Only for connections whose provider type has requiresOAuth set (see
+        GET /api/v1/provider-types); the app-wide client credentials for that
+        type must be configured first (PUT
+        /api/v1/provider-types/{type}/oauth-credentials), which must
+        already have this server's own GET /api/v1/oauth/callback
+        registered as their redirect URI (see that endpoint's description).
+        Returns the consent URL the user must open; poll the GET variant of
+        this endpoint for completion - the actual token exchange happens
+        when the provider redirects the browser to GET
+        /api/v1/oauth/callback, not synchronously with this call.
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "202":
+          description: Flow started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authUrl:
+                    type: string
+        "400":
+          description: >
+            The connection's provider type needs no interactive
+            authorization, or its client credentials are not configured yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    get:
+      summary: Poll the status of an in-progress (or just-finished) authorize flow
+      parameters:
+        - $ref: "#/components/parameters/connectionId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authUrl:
+                    type: string
+                  done:
+                    type: boolean
+                  error:
+                    type: string
+        "404":
+          description: No authorize flow has been started for this connection
+
+  /api/v1/provider-types/{type}/oauth-credentials:
+    get:
+      summary: Whether this provider type's app-wide OAuth client is configured
+      description: >
+        Reports presence only - the stored values are never returned.
+      parameters:
+        - $ref: "#/components/parameters/providerType"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured:
+                    type: boolean
+        "400":
+          description: This provider type needs no interactive authorization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      summary: Configure this provider type's app-wide OAuth Client ID/Secret
+      description: >
+        One registered OAuth client per provider type (a Google Cloud "Web
+        application" client, a Dropbox App) covers every connection of that
+        type - set once, shared by all of them (see
+        internal/provider.OAuthFlow.AppCredentialsID). Values are stored in
+        the OS keychain, never in config.json, and are never readable back
+        through this API. Whichever redirect URI you register with the
+        provider must be this server's own GET /api/v1/oauth/callback,
+        reachable however clients actually reach this API (e.g.
+        http://127.0.0.1:3000/api/v1/oauth/callback for the default local
+        run, or your real public URL behind a reverse proxy).
+      parameters:
+        - $ref: "#/components/parameters/providerType"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientId, clientSecret]
+              properties:
+                clientId:
+                  type: string
+                clientSecret:
+                  type: string
+      responses:
+        "204":
+          description: Stored
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/oauth/callback:
+    get:
+      summary: OAuth2 redirect target - not called directly by API clients
+      security: []
+      description: >
+        This is the exact URL to register as every provider's redirect URI
+        (see PUT /api/v1/provider-types/{type}/oauth-credentials) - the
+        provider's own consent page redirects the user's browser here after
+        they approve or deny access, so unlike every other /api/v1/* route
+        it is unauthenticated: the browser arriving from Google/Dropbox/
+        Yandex/Microsoft has no bearer token to attach. state ties the
+        request back to whichever connection's POST .../oauth/authorize
+        started it (rejecting anything it doesn't recognize, including a
+        replayed callback - each state is single-use); code is exchanged
+        for a refresh token, stored under that connection. Renders a small
+        HTML page either way, since a real browser lands here - poll
+        GET /api/v1/connections/{id}/oauth/authorize for the machine-
+        readable outcome instead of parsing this response.
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: error
+          in: query
+          description: Present instead of code when the user denied access
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >
+            An HTML page reporting success or failure - always 200 once
+            state is recognized, since the actual outcome belongs in the
+            authorize-status poll, not this response's status code.
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: Unknown, expired, or already-used state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/history:
+    get:
+      summary: List upload history entries
+      description: >
+        Paginated, newest upload first. Defaults to 50 entries per page
+        (limit's default and maximum are the server's
+        DefaultHistoryPageSize/MaxHistoryPageSize) - a long-running
+        install's log can grow large over time, so this endpoint never
+        returns it whole in one response.
+      parameters:
+        - name: connectionId
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: One of success / error / cancelled.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: >
+            Max entries to return. Defaults to 50; values above 200 are
+            silently clamped to 200 - see the response's `limit` field for
+            what was actually used.
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          description: How many matching entries to skip before this page. Defaults to 0.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryPage"
+        "400":
+          description: limit or offset is not a valid integer.
+
+  /api/v1/history/{id}:
+    get:
+      summary: Get a single history entry
+      parameters:
+        - $ref: "#/components/parameters/historyId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryEntry"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete a history entry
+      description: Only removes the local journal row - never touches the remote object.
+      parameters:
+        - $ref: "#/components/parameters/historyId"
+      responses:
+        "204":
+          description: Deleted
+
+  /api/v1/history/{id}/verify:
+    post:
+      summary: Re-check that an uploaded object still exists and matches its checksum
+      description: >
+        Sets the returned HistoryEntry's LastCheckStatus: "missing" if the
+        object is gone, "mismatch" if it exists but the checksum no longer
+        matches, "ok" if it matches, "unverifiable" if the provider
+        supports neither an existence nor a checksum check, or "error" if
+        reaching the provider itself failed.
+      parameters:
+        - $ref: "#/components/parameters/historyId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryEntry"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/settings:
+    get:
+      summary: Get application-wide settings
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+    put:
+      summary: Replace application-wide settings
+      description: >
+        Concurrency limit and verify-after-upload are applied to the
+        running upload queue immediately, no restart needed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Settings"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+
+  /api/v1/watches:
+    get:
+      summary: List watch rules
+      description: >
+        Each rule watches a local file or folder on the machine cmd/server
+        itself runs on (not on any remote client's machine - REST is just
+        the protocol other programs use to talk to cloudup, it can't watch
+        a filesystem it has no access to) and uploads anything created or
+        modified there through the given connection. status/statusMessage
+        reflect the rule's live state, not just what was persisted:
+        "watching" (normal), "error" (most recently failed to watch the
+        path or resolve the connection - see statusMessage), or "disabled".
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WatchRule"
+    post:
+      summary: Create a watch rule
+      description: >
+        Unlike a rule resumed from a server restart, a freshly created rule
+        immediately uploads every file already present under localPath, not
+        just future changes. A localPath that does not exist is rejected
+        (400) rather than persisted in a broken state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchRuleRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchRule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: The folder-watch engine could not start on this server.
+
+  /api/v1/watches/{id}:
+    put:
+      summary: Update a watch rule
+      description: >
+        Also how a rule is paused/resumed (enabled false/true) without
+        deleting and recreating it - re-enabling never re-triggers the
+        create-time "upload everything already there" scan, only POST does.
+      parameters:
+        - $ref: "#/components/parameters/watchId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchRuleRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchRule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete a watch rule
+      parameters:
+        - $ref: "#/components/parameters/watchId"
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/languages:
+    get:
+      summary: List installed UI languages
+      description: >
+        The set of languages is not fixed at build time: besides the ones
+        built into the server binary, any JSON catalog dropped into the
+        server's languages directory is picked up at startup. Clients should
+        therefore build a language picker from this endpoint rather than
+        hardcoding a list.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Language"
+        "503":
+          description: Translation catalogs are not loaded on this server
+
+  /api/v1/languages/{code}:
+    get:
+      summary: Get one language's UI strings
+      description: >
+        Returns a flat object of translation key to translated string. The
+        map is always complete - the server fills any keys a catalog is
+        missing from its fallback language - so clients need no fallback
+        logic of their own. An unknown code returns the fallback language's
+        strings rather than an error, so a UI whose stored language has
+        since been removed still renders.
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+          example: ru
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                example:
+                  nav.queue: Очередь
+                  nav.history: История
+        "503":
+          description: Translation catalogs are not loaded on this server
+
+  /api/v1/updates/check:
+    get:
+      summary: Check for a newer release
+      description: >
+        Queries GitHub for the latest published release and compares it
+        against this server's build version. This is the only endpoint that
+        makes an outbound call to anything other than a configured storage
+        provider - and it does so only when a client calls it, never on a
+        schedule or at startup, matching cloudup's "silent unless asked"
+        design. currentVersion is "dev" for a build made without the
+        version ldflag; updateAvailable is always false in that case, since
+        there is nothing meaningful to compare "dev" against.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateCheckResult"
+        "502":
+          description: Could not reach GitHub or it returned an unexpected response
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Required on every /api/v1/* request. The token is generated randomly
+        at each server startup unless CLOUDUP_API_TOKEN is set, and is never
+        written to disk. Where to obtain it depends on how the server runs:
+        when it serves the bundled frontend (the default) the token is
+        injected into index.html as window.__CLOUDUP_TOKEN__, so a browser
+        opening the page is already authorized and nothing is logged; in
+        API-only mode (-static "") it is written to the server log instead,
+        since there is no page to inject it into.
+  parameters:
+    connectionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    taskId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    historyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+    providerType:
+      name: type
+      in: path
+      required: true
+      schema:
+        type: string
+    watchId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+    ProviderType:
+      type: object
+      properties:
+        type:
+          type: string
+          example: dropbox
+        requiresOAuth:
+          type: boolean
+          description: >
+            True for provider types whose connections need an interactive
+            authorization step (googledrive, dropbox, yandexdisk, onedrive)
+            before they can be used at all - creating the connection is not
+            enough.
+    FieldSpec:
+      type: object
+      properties:
+        Key:
+          type: string
+        Label:
+          type: string
+        Type:
+          type: string
+          enum: [text, password, select]
+        Required:
+          type: boolean
+        Options:
+          type: array
+          items:
+            type: string
+    Connection:
+      type: object
+      properties:
+        id:
+          type: string
+        providerType:
+          type: string
+        displayName:
+          type: string
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+    ConnectionRequest:
+      type: object
+      required: [providerType, displayName]
+      properties:
+        providerType:
+          type: string
+        displayName:
+          type: string
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+          description: Non-secret ConfigSchema fields (text/select).
+        secrets:
+          type: object
+          additionalProperties:
+            type: string
+          description: Secret ConfigSchema fields (password), stored in the OS keychain.
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+        connectionId:
+          type: string
+        localPath:
+          type: string
+        remotePath:
+          type: string
+        status:
+          type: string
+          enum: [queued, uploading, success, error, cancelled]
+        sent:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+        error:
+          type: string
+        historyId:
+          type: integer
+          format: int64
+    HistoryEntry:
+      type: object
+      properties:
+        ID:
+          type: integer
+          format: int64
+        LocalPath:
+          type: string
+        LocalSize:
+          type: integer
+          format: int64
+        ProviderID:
+          type: string
+        ProviderType:
+          type: string
+        RemotePath:
+          type: string
+        RemoteURL:
+          type: string
+        Checksum:
+          type: string
+        ChecksumAlgo:
+          type: string
+        UploadedAt:
+          type: string
+          format: date-time
+        Status:
+          type: string
+          enum: [success, error, cancelled]
+        LastCheckedAt:
+          type: string
+          format: date-time
+          nullable: true
+        LastCheckStatus:
+          type: string
+          enum: [ok, missing, mismatch, unverifiable, error, ""]
+    HistoryPage:
+      description: >
+        One page of GET /api/v1/history's results. Total is the number of
+        entries matching the request's filters across every page (not just
+        this one), so a client can render "page X of Y" or detect the last
+        page without an extra request. Limit/Offset echo the effective
+        values actually used - a limit above the server's maximum is
+        clamped, so a client that asked for more must check Limit to see
+        what it actually got.
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryEntry"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+    Settings:
+      type: object
+      properties:
+        maxConcurrentUploadsPerProvider:
+          type: integer
+        verifyChecksumAfterUpload:
+          description: >
+            Automatically re-checks an object's checksum right after a
+            successful upload (verification is otherwise a manual action
+            via POST /api/v1/history/{id}/verify). Keyed by provider TYPE
+            (e.g. "webdav", "yandexdisk" - the same strings
+            GET /api/v1/provider-types returns), not by connection, so the
+            same choice applies to every connection of that type. A type
+            absent from the object defaults to off - the cost varies a lot
+            per provider (a cheap metadata read for googledrive/b2/
+            yandexdisk/onedrive, a full re-download for webdav/s3/dropbox,
+            which have no reliable native hash), which is exactly why this
+            is per-type instead of one global switch.
+          type: object
+          additionalProperties:
+            type: boolean
+          example:
+            yandexdisk: true
+            webdav: false
+        language:
+          description: >
+            UI language code, one of the codes reported by
+            GET /api/v1/languages. Stored and served only - the backend
+            never interprets it.
+          type: string
+        multiThreadStreams:
+          description: >
+            When > 1, uploads a large file's chunks concurrently across this
+            many streams instead of one at a time (like rclone's
+            --multi-thread-streams). Only takes effect for providers whose
+            chunked-upload protocol supports concurrent parts (S3, Backblaze
+            B2 - not Dropbox) and only for files at/above
+            multiThreadThresholdBytes. 1 disables it. Default: 4.
+          type: integer
+        multiThreadThresholdBytes:
+          description: >
+            Minimum file size before multiThreadStreams kicks in. Default:
+            268435456 (256 MiB), rclone's own default.
+          type: integer
+          format: int64
+        maxUploadBytesPerSecond:
+          description: >
+            Caps the combined upload byte rate across every provider
+            connection at once (like rclone's --bwlimit) - a single global
+            budget, not a per-provider limit, so several providers uploading
+            in parallel still share it. 0 (the default) means unlimited;
+            negative values are clamped to 0.
+          type: integer
+          format: int64
+        idleConnectionTimeoutMinutes:
+          description: >
+            How long a connection may sit idle (no pending or in-flight
+            upload) before its background scheduling state is torn down and
+            its dispatcher goroutine stopped - purely an internal resource
+            cleanup with no effect on uploads themselves; a new one is
+            recreated transparently the next time the connection is used.
+            Not an exact deadline: cleanup happens after two checks spaced
+            this many minutes apart both find the connection idle, so real
+            idle time before cleanup is between this value and twice it -
+            deliberately, so a brief pause between files in the same
+            multi-file upload is never mistaken for "done". Values below 1
+            are raised to 1. Default: 10.
+          type: integer
+
+    WatchRule:
+      description: >
+        A "watch this local file/folder, upload changes" rule. localPath is
+        always resolved against the filesystem of the machine cmd/server
+        runs on.
+      type: object
+      properties:
+        id:
+          type: string
+        localPath:
+          type: string
+        connectionId:
+          type: string
+        remoteFolder:
+          type: string
+        enabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [watching, error, disabled]
+        statusMessage:
+          description: Set only when status is "error".
+          type: string
+    WatchRuleRequest:
+      type: object
+      properties:
+        localPath:
+          type: string
+        connectionId:
+          type: string
+        remoteFolder:
+          type: string
+        enabled:
+          description: >
+            Ignored by POST (a newly created rule always starts enabled) -
+            only PUT uses it, to pause/resume the rule.
+          type: boolean
+      required: [localPath, connectionId]
+
+    Language:
+      type: object
+      properties:
+        code:
+          description: Language code, taken from the catalog's file name.
+          type: string
+          example: ru
+        name:
+          description: >
+            The language's own name for itself, from the catalog's reserved
+            "__name__" key - so a new language labels itself with no code
+            change anywhere.
+          type: string
+          example: Русский
+
+    UpdateCheckResult:
+      type: object
+      properties:
+        currentVersion:
+          type: string
+          example: v1.2.3
+        latestVersion:
+          type: string
+          example: v1.3.0
+        updateAvailable:
+          type: boolean
+        releaseUrl:
+          type: string
+          example: https://github.com/Charmer/cloudup/releases/tag/v1.3.0

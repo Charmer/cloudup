@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Как устроен cloudup: режимы запуска, путь загрузки, модель полос в очереди, провайдеры и чек-суммы, где лежит состояние.">
+<meta name="color-scheme" content="light dark">
+<title>Cloudup изнутри</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@500;600;700&family=Literata:opsz,wght@7..72,400;7..72,600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+<style>
+  :root {
+    /* Светлая палитра — холодные slate-нейтрали со сдвигом оттенка к акценту */
+    --ground: #f6f8f8;
+    --surface: #ffffff;
+    --surface-sunk: #eef1f2;
+    --ink: #14191c;
+    --ink-soft: #4a555b;
+    --ink-faint: #74828a;
+    --rule: #d7dee0;
+    --rule-soft: #e6ebec;
+    --accent: #0c6f79;
+    --accent-soft: #e2f0f1;
+    --ok: #2c7048;
+    --flight: #8f5a0d;
+    --shadow: 0 1px 2px rgba(20, 25, 28, .05), 0 8px 24px -16px rgba(20, 25, 28, .18);
+
+    --measure: 66ch;
+    --step-0: 1.0625rem;
+    --step-1: 1.3rem;
+    --step-3: 2.25rem;
+    --step-4: 3rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f1316;
+      --surface: #161b1f;
+      --surface-sunk: #1c2226;
+      --ink: #e7ecee;
+      --ink-soft: #a9b5bb;
+      --ink-faint: #7d8b92;
+      --rule: #2b333a;
+      --rule-soft: #222a2f;
+      --accent: #46b3bd;
+      --accent-soft: #16302f;
+      --ok: #62b184;
+      --flight: #d09a3f;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0f1316;
+    --surface: #161b1f;
+    --surface-sunk: #1c2226;
+    --ink: #e7ecee;
+    --ink-soft: #a9b5bb;
+    --ink-faint: #7d8b92;
+    --rule: #2b333a;
+    --rule-soft: #222a2f;
+    --accent: #46b3bd;
+    --accent-soft: #16302f;
+    --ok: #62b184;
+    --flight: #d09a3f;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .7);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: Literata, Georgia, "Times New Roman", serif;
+    font-size: var(--step-0);
+    line-height: 1.66;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, .eyebrow, .chip, th, .facts dd {
+    font-family: "Golos Text", "Helvetica Neue", Arial, sans-serif;
+  }
+
+  code, .mono, .endpoint, td.num, .kicker, .facts dt {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  /* ---------- каркас ---------- */
+  .shell {
+    display: grid;
+    grid-template-columns: 1fr;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 1.4rem 6rem;
+  }
+
+  @media (min-width: 1080px) {
+    .shell {
+      grid-template-columns: 13.5rem minmax(0, 1fr);
+      column-gap: 3.5rem;
+      padding-right: 2.5rem;
+    }
+  }
+
+  .rail { display: none; }
+
+  @media (min-width: 1080px) {
+    .rail {
+      display: block;
+      position: sticky;
+      top: 0;
+      align-self: start;
+      padding-top: 5.2rem;
+      max-height: 100vh;
+      overflow-y: auto;
+    }
+    .rail ol {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: .55rem;
+      border-left: 1px solid var(--rule);
+    }
+    .rail a {
+      display: block;
+      padding: .1rem 0 .1rem .9rem;
+      margin-left: -1px;
+      border-left: 2px solid transparent;
+      font-family: "Golos Text", sans-serif;
+      font-size: .79rem;
+      color: var(--ink-faint);
+      text-decoration: none;
+      line-height: 1.35;
+    }
+    .rail a:hover { color: var(--accent); border-left-color: var(--accent); }
+  }
+
+  main { min-width: 0; }
+  .prose { max-width: var(--measure); }
+
+  /* ---------- шапка ---------- */
+  header.mast {
+    padding: 5rem 0 2.6rem;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 3rem;
+  }
+
+  .kicker {
+    font-size: .72rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1.1rem;
+  }
+
+  h1 {
+    font-size: var(--step-4);
+    font-weight: 700;
+    letter-spacing: -.028em;
+    line-height: 1.04;
+    text-wrap: balance;
+    margin: 0 0 1.1rem;
+  }
+
+  .standfirst {
+    font-size: var(--step-1);
+    line-height: 1.52;
+    color: var(--ink-soft);
+    max-width: 58ch;
+    margin: 0;
+  }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.2rem 2.4rem;
+    margin: 2.4rem 0 0;
+    padding: 0;
+  }
+  .facts div { display: flex; flex-direction: column; gap: .15rem; }
+  .facts dt {
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .facts dd {
+    margin: 0;
+    font-weight: 600;
+    font-size: 1.05rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- секции ---------- */
+  section { margin-bottom: 4.2rem; scroll-margin-top: 1.5rem; }
+
+  .eyebrow {
+    font-size: .7rem;
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 .5rem;
+  }
+
+  h2 {
+    font-size: var(--step-3);
+    font-weight: 700;
+    letter-spacing: -.02em;
+    line-height: 1.14;
+    text-wrap: balance;
+    margin: 0 0 1.2rem;
+  }
+
+  h3 {
+    font-size: var(--step-1);
+    font-weight: 600;
+    margin: 2.4rem 0 .7rem;
+    text-wrap: balance;
+  }
+
+  p { margin: 0 0 1.15rem; }
+  .prose > p:last-child { margin-bottom: 0; }
+
+  ul.notes { margin: 0 0 1.15rem; padding-left: 1.15rem; }
+  ul.notes li { margin-bottom: .55rem; }
+
+  code {
+    font-size: .86em;
+    background: var(--surface-sunk);
+    padding: .1em .34em;
+    border-radius: 3px;
+  }
+
+  strong { font-weight: 600; }
+
+  /* ---------- схемы ---------- */
+  figure {
+    margin: 2.2rem 0;
+    padding: 1.4rem 1.4rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+  figure svg {
+    display: block;
+    width: 100%;
+    min-width: 580px;
+    height: auto;
+    color: var(--ink-soft);
+  }
+  figcaption {
+    margin-top: 1rem;
+    padding-top: .85rem;
+    border-top: 1px solid var(--rule-soft);
+    font-size: .9rem;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    max-width: 68ch;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .svg-box { fill: var(--surface); stroke: currentColor; stroke-width: 1.25; }
+  .svg-box-key { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .svg-lane { fill: var(--surface-sunk); stroke: none; }
+  .svg-t { font-family: "Golos Text", sans-serif; font-size: 13px; font-weight: 600; fill: var(--ink); }
+  .svg-t-sm { font-family: "JetBrains Mono", monospace; font-size: 10px; fill: var(--ink-faint); }
+  .svg-t-edge { font-family: "JetBrains Mono", monospace; font-size: 10px; fill: var(--ink-soft); }
+  .svg-t-key { fill: var(--accent); }
+  .svg-line { stroke: currentColor; stroke-width: 1.25; fill: none; }
+  .svg-line-key { stroke: var(--accent); stroke-width: 1.5; fill: none; }
+
+  /* ---------- таблицы ---------- */
+  .table-wrap { overflow-x: auto; margin: 1.6rem 0 1.2rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .93rem; min-width: 540px; }
+  th {
+    text-align: left;
+    font-size: .67rem;
+    font-weight: 600;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: 0 1rem .5rem 0;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  td { padding: .62rem 1rem .62rem 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; font-size: .84rem; }
+  td:last-child, th:last-child { padding-right: 0; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .chip {
+    display: inline-block;
+    font-size: .65rem;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    padding: .16rem .45rem;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .chip-native { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+  .chip-self { color: var(--flight); background: color-mix(in srgb, var(--flight) 14%, transparent); }
+
+  /* ---------- врезка ---------- */
+  .callout {
+    margin: 2rem 0;
+    padding: 1.1rem 1.3rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    max-width: var(--measure);
+  }
+  .callout p { margin: 0; font-size: .95rem; color: var(--ink-soft); }
+  .callout p + p { margin-top: .7rem; }
+  .callout .label {
+    display: block;
+    font-family: "Golos Text", sans-serif;
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: .5rem;
+  }
+
+  /* ---------- эндпоинты ---------- */
+  .routes {
+    margin: 1.5rem 0;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .route-group { border-bottom: 1px solid var(--rule); padding: .9rem 1.1rem; }
+  .route-group:last-child { border-bottom: none; }
+  .route-group h4 { margin: 0 0 .5rem; font-size: .82rem; font-weight: 600; color: var(--ink); }
+  .endpoint {
+    display: block;
+    font-size: .77rem;
+    line-height: 1.8;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    overflow-x: auto;
+  }
+  .endpoint b { color: var(--accent); font-weight: 500; }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.6rem;
+    max-width: var(--measure);
+    font-size: .88rem;
+    color: var(--ink-faint);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav class="rail" aria-label="Разделы">
+    <ol>
+      <li><a href="#shape">Общая форма</a></li>
+      <li><a href="#run">Один бинарник, два режима</a></li>
+      <li><a href="#upload">Путь загрузки</a></li>
+      <li><a href="#watches">Слежение за папками</a></li>
+      <li><a href="#lanes">Очередь: полосы и retry</a></li>
+      <li><a href="#providers">Провайдеры и чек-суммы</a></li>
+      <li><a href="#secrets">Секреты и OAuth</a></li>
+      <li><a href="#history">Журнал загрузок</a></li>
+      <li><a href="#layers">Кто кого может импортировать</a></li>
+      <li><a href="#api">Поверхность API</a></li>
+      <li><a href="#i18n">Языки</a></li>
+      <li><a href="#state">Где лежит состояние</a></li>
+      <li><a href="#edges">Шероховатости</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="mast">
+      <p class="kicker">cloudup · архитектура</p>
+      <h1>Cloudup изнутри</h1>
+      <p class="standfirst">Локальный Go-сервер, который раскладывает один файл сразу по нескольким облачным
+        хранилищам — и ведёт журнал, достаточно честный, чтобы через месяцы ответить, лежит ли файл на месте и не
+        изменился ли он.</p>
+      <dl class="facts">
+        <div><dt>Провайдеров</dt><dd>5</dd></div>
+        <div><dt>Маршрутов API</dt><dd>29</dd></div>
+        <div><dt>Точек входа</dt><dd>1</dd></div>
+        <div><dt>Go-пакетов</dt><dd>18</dd></div>
+      </dl>
+    </header>
+
+    <section id="shape">
+      <div class="prose">
+        <p class="eyebrow">Ориентация</p>
+        <h2>Общая форма</h2>
+        <p>Cloudup — это один Go-процесс. Он слушает <code>127.0.0.1:3000</code>, отдаёт REST API под
+          <code>/api/v1</code> и на том же порту раздаёт собранный Vue-фронтенд прямо с диска. Ни второго процесса, ни
+          отдельного сервера для фронтенда, ни обратного прокси в обычном случае.</p>
+        <p>Почти весь дизайн объясняется тремя идеями:</p>
+        <ul class="notes">
+          <li><strong>Ядро не знает ни об одном конкретном хранилище.</strong> Провайдер — это пакет, который
+            регистрирует себя сам; очередь, история и API видят только интерфейс.</li>
+          <li><strong>Прогресс тянут, а не пушат.</strong> Клиент опрашивает снепшот. Ни WebSocket, ни SSE, ни
+            договорённостей о протоколе — а это важно, потому что клиентом вполне может быть чужой код.</li>
+          <li><strong>Каждая загрузка оставляет проверяемый след.</strong> Чек-сумма ложится в локальный SQLite, и
+            позже тот же провайдер, который её посчитал, может ответить, совпадает ли файл на хранилище.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="run">
+      <div class="prose">
+        <p class="eyebrow">Запуск</p>
+        <h2>Один бинарник, два режима</h2>
+        <p>Один и тот же исполняемый файл — и десктопное приложение, и безголовый сервис. Чем он станет, решается при
+          старте флагом <code>-gui</code>, и когда флаг не передан, режим <em>определяется</em>, а не берётся по
+          умолчанию: на Linux по <code>$DISPLAY</code>/<code>$WAYLAND_DISPLAY</code>, на Windows по
+          <code>$SESSIONNAME</code> (эвристика слабее — для настоящей службы флаг лучше передать явно), на остальных
+          платформах предполагается десктоп.</p>
+        <p>В GUI-режиме есть иконка в трее, браузер открывается сам, а лог уходит в файл — консоли обычно всё равно не
+          видно. В headless-режиме это обычный процесс на переднем плане с логом в stdout: та форма, которая нужна под
+          systemd, в контейнере или рядом с другим backend-приложением.</p>
+        <p>API-токен генерируется заново при каждом старте (если его не фиксирует <code>CLOUDUP_API_TOKEN</code>) и
+          никогда не пишется на диск. Когда фронтенд раздаётся локально, токен инжектируется прямо в
+          <code>index.html</code> — открывшийся браузер уже авторизован, и в лог ничего не попадает. И только в
+          API-only режиме (<code>-static ""</code>) токен доходит до лога, потому что взять его больше негде.</p>
+      </div>
+
+      <div class="callout">
+        <span class="label">Почему CORS выключен по умолчанию</span>
+        <p>При обычном запуске на одном порту страница и API имеют один origin, поэтому браузер вообще не начинает
+          CORS-проверку — а не-браузерный клиент эти заголовки не читает никогда. CORS нужен ровно в одной ситуации:
+          фронтенд отдан с другого origin, например dev-сервером Vite. Отсюда флаг <code>-cors-origin</code>, пустой по
+          умолчанию, который просто не вставляет middleware в цепочку.</p>
+        <p>И стоит быть точным в том, чем CORS <em>не</em> является: он никогда не защищал этот API. Чужая страница и
+          без него может <em>отправить</em> запрос на loopback-порт — same-origin policy запрещает только
+          <em>прочитать ответ</em>. Защищает bearer-токен.</p>
+      </div>
+    </section>
+
+    <section id="upload">
+      <div class="prose">
+        <p class="eyebrow">Главный механизм</p>
+        <h2>Путь загрузки</h2>
+        <p>Файл приходит обычным <code>multipart/form-data</code>. Прежде чем что-то попадёт в очередь, тело запроса
+          сбрасывается в spool-файл на локальный диск — и этот крюк несёт на себе больше всего смысла во всём
+          конвейере.</p>
+      </div>
+
+      <figure>
+        <svg viewBox="0 0 880 250" role="img"
+             aria-label="Загрузка идёт от браузера в spool-файл на диске, затем через менеджер очереди к провайдеру и на удалённое хранилище. Стрелка повторной попытки возвращается от провайдера к spool-файлу, а очередь пишет запись в журнал SQLite.">
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="currentColor" stroke="none"></path>
+            </marker>
+            <marker id="ahk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--accent)" stroke="none"></path>
+            </marker>
+          </defs>
+
+          <path class="svg-line-key" d="M 620 74 L 620 26 L 268 26 L 268 74" marker-end="url(#ahk)"></path>
+          <text class="svg-t-edge svg-t-key" x="444" y="20" text-anchor="middle">каждая попытка открывает spool заново</text>
+
+          <rect class="svg-box" x="10" y="74" width="130" height="56" rx="3"></rect>
+          <text class="svg-t" x="75" y="99" text-anchor="middle">Браузер</text>
+          <text class="svg-t-sm" x="75" y="116" text-anchor="middle">POST /uploads</text>
+
+          <line class="svg-line" x1="140" y1="102" x2="178" y2="102" marker-end="url(#ah)"></line>
+
+          <rect class="svg-box-key" x="188" y="74" width="160" height="56" rx="3"></rect>
+          <text class="svg-t svg-t-key" x="268" y="99" text-anchor="middle">Spool-файл</text>
+          <text class="svg-t-sm" x="268" y="116" text-anchor="middle">os.TempDir()</text>
+
+          <line class="svg-line" x1="348" y1="102" x2="386" y2="102" marker-end="url(#ah)"></line>
+
+          <rect class="svg-box" x="396" y="74" width="164" height="56" rx="3"></rect>
+          <text class="svg-t" x="478" y="99" text-anchor="middle">queue.Manager</text>
+          <text class="svg-t-sm" x="478" y="116" text-anchor="middle">полоса на подключение</text>
+
+          <line class="svg-line" x1="560" y1="102" x2="598" y2="102" marker-end="url(#ah)"></line>
+
+          <rect class="svg-box" x="608" y="74" width="120" height="56" rx="3"></rect>
+          <text class="svg-t" x="668" y="99" text-anchor="middle">Провайдер</text>
+          <text class="svg-t-sm" x="668" y="116" text-anchor="middle">стрим + хэш</text>
+
+          <line class="svg-line" x1="728" y1="102" x2="766" y2="102" marker-end="url(#ah)"></line>
+
+          <rect class="svg-box" x="776" y="74" width="94" height="56" rx="3"></rect>
+          <text class="svg-t" x="823" y="99" text-anchor="middle">Облако</text>
+          <text class="svg-t-sm" x="823" y="116" text-anchor="middle">хранилище</text>
+
+          <path class="svg-line" d="M 478 130 L 478 180" marker-end="url(#ah)"></path>
+          <text class="svg-t-edge" x="490" y="158">пишет результат и чек-сумму</text>
+          <rect class="svg-box" x="368" y="188" width="220" height="48" rx="3"></rect>
+          <text class="svg-t" x="478" y="209" text-anchor="middle">history.db</text>
+          <text class="svg-t-sm" x="478" y="225" text-anchor="middle">upload_log (SQLite)</text>
+        </svg>
+        <figcaption><b>Зачем нужен spool-файл.</b> Очередь вызывает <code>Open()</code> заново на каждую попытку, потому
+          что retry обязан прочитать байты с начала. А тело HTTP-запроса читается ровно один раз. Именно сброс на диск
+          и делает повторные попытки возможными в принципе; файл удаляется, когда задача приходит в терминальный
+          статус.</figcaption>
+      </figure>
+
+      <div class="prose">
+        <p>Одно следствие стоит принять сразу: HTTP-обработчик отвечает <code>202</code> с идентификатором задачи почти
+          мгновенно. В этот момент он ничего не загрузил — он лишь припарковал байты и поставил работу в очередь. Всё
+          дальнейшее наблюдается поллингом <code>/api/v1/tasks</code>.</p>
+        <p>Снепшот, который опрашивает клиент, поддерживает единственный фоновый читатель канала событий очереди. У
+          этого канала может быть только один потребитель — поэтому даже горутина, убирающая spool-файлы, опрашивает
+          тот же снепшот, а не читает канал вторично.</p>
+      </div>
+    </section>
+
+    <section id="watches">
+      <div class="prose">
+        <p class="eyebrow">Второй вход в ту же очередь</p>
+        <h2>Слежение за папками</h2>
+        <p><code>internal/watch</code> — второй способ положить задачу в <code>queue.Manager</code>, минуя HTTP и
+          spool-файл целиком: <code>fsnotify</code> следит за локальной папкой/файлом <em>на той же машине</em>, где
+          работает сам <code>cmd/server</code>, и по устоявшемуся (тихий период 2&nbsp;с без новых событий) изменению
+          сразу вызывает <code>Enqueue</code> с <code>Open()</code>, читающим локальный файл напрямую — spool не
+          нужен, потому что файл на диске и так можно переоткрыть на любой повтор попытки, в отличие от тела
+          HTTP-запроса.</p>
+      </div>
+
+      <figure>
+        <svg viewBox="0 0 880 140" role="img"
+             aria-label="Локальный файл через fsnotify и Engine попадает в тот же queue.Manager, что и обычная HTTP-загрузка, минуя spool-файл.">
+          <defs>
+            <marker id="ahw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="currentColor" stroke="none"></path>
+            </marker>
+          </defs>
+
+          <rect class="svg-box" x="10" y="40" width="150" height="56" rx="3"></rect>
+          <text class="svg-t" x="85" y="65" text-anchor="middle">Локальная папка</text>
+          <text class="svg-t-sm" x="85" y="82" text-anchor="middle">fsnotify</text>
+
+          <line class="svg-line" x1="160" y1="68" x2="198" y2="68" marker-end="url(#ahw)"></line>
+
+          <rect class="svg-box" x="208" y="40" width="150" height="56" rx="3"></rect>
+          <text class="svg-t" x="283" y="65" text-anchor="middle">watch.Engine</text>
+          <text class="svg-t-sm" x="283" y="82" text-anchor="middle">debounce 2 с</text>
+
+          <line class="svg-line" x1="358" y1="68" x2="396" y2="68" marker-end="url(#ahw)"></line>
+
+          <rect class="svg-box-key" x="406" y="40" width="164" height="56" rx="3"></rect>
+          <text class="svg-t svg-t-key" x="488" y="65" text-anchor="middle">queue.Manager</text>
+          <text class="svg-t-sm" x="488" y="82" text-anchor="middle">тот же, что у HTTP-пути</text>
+
+          <line class="svg-line" x1="570" y1="68" x2="608" y2="68" marker-end="url(#ahw)"></line>
+
+          <rect class="svg-box" x="618" y="40" width="120" height="56" rx="3"></rect>
+          <text class="svg-t" x="678" y="65" text-anchor="middle">Провайдер</text>
+          <text class="svg-t-sm" x="678" y="82" text-anchor="middle">стрим + хэш</text>
+
+          <line class="svg-line" x1="738" y1="68" x2="776" y2="68" marker-end="url(#ahw)"></line>
+
+          <rect class="svg-box" x="786" y="40" width="84" height="56" rx="3"></rect>
+          <text class="svg-t" x="828" y="65" text-anchor="middle">Облако</text>
+        </svg>
+        <figcaption>Прогресс и история такого файла видны в тех же <code>/api/v1/tasks</code>/<code>/api/v1/history</code>,
+          что и у обычной загрузки — отдельного отслеживания слежение не требует.</figcaption>
+      </figure>
+
+      <div class="callout">
+        <span class="label">Только локальная файловая система cmd/server</span>
+        <p>REST — протокол, которым <em>другие</em> программы говорят с cloudup; сам процесс — обычный Go-бинарник
+          с полным доступом к своей ФС (так же он уже читает <code>frontend/dist</code>/<code>config.json</code> с
+          диска). Следить за папкой на машине стороннего клиента (например, сервера, встраивающего cloudup)
+          физически невозможно — та сторона следит сама и зовёт обычный <code>POST /uploads</code>.</p>
+      </div>
+    </section>
+
+    <section id="lanes">
+      <div class="prose">
+        <p class="eyebrow">Планирование</p>
+        <h2>Очередь: полосы и retry</h2>
+        <p>У каждого подключения своя полоса. Полосы идут одновременно; внутри полосы файлы стартуют в том порядке, в
+          котором были поставлены. Настройка параллельности поднимает, сколько самых старых ожидающих файлов полосы
+          могут идти одновременно — но порядок она не меняет.</p>
+      </div>
+
+      <figure>
+        <svg viewBox="0 0 760 236" role="img"
+             aria-label="Три полосы подключений идут параллельно. В каждой полосе файлы стартуют в порядке очереди: один файл в работе, остальные ждут. Полосы независимы, поэтому приостановленная или зависшая полоса не задерживает остальные.">
+          <text class="svg-t-sm" x="10" y="18">полосы идут параллельно · порядок внутри полосы сохраняется</text>
+
+          <rect class="svg-lane" x="118" y="32" width="632" height="46" rx="3"></rect>
+          <text class="svg-t" x="10" y="60">Nextcloud</text>
+          <rect class="svg-box-key" x="130" y="42" width="124" height="26" rx="3"></rect>
+          <text class="svg-t-sm svg-t-key" x="192" y="59" text-anchor="middle">report.pdf ▸ 41%</text>
+          <rect class="svg-box" x="266" y="42" width="104" height="26" rx="3"></rect>
+          <text class="svg-t-sm" x="318" y="59" text-anchor="middle">notes.md</text>
+          <rect class="svg-box" x="382" y="42" width="104" height="26" rx="3"></rect>
+          <text class="svg-t-sm" x="434" y="59" text-anchor="middle">scan.jpg</text>
+
+          <rect class="svg-lane" x="118" y="90" width="632" height="46" rx="3"></rect>
+          <text class="svg-t" x="10" y="118">S3-бакет</text>
+          <rect class="svg-box-key" x="130" y="100" width="124" height="26" rx="3"></rect>
+          <text class="svg-t-sm svg-t-key" x="192" y="117" text-anchor="middle">report.pdf ▸ 12%</text>
+          <rect class="svg-box" x="266" y="100" width="104" height="26" rx="3"></rect>
+          <text class="svg-t-sm" x="318" y="117" text-anchor="middle">notes.md</text>
+
+          <rect class="svg-lane" x="118" y="148" width="632" height="46" rx="3"></rect>
+          <text class="svg-t" x="10" y="176">Dropbox</text>
+          <rect class="svg-box" x="130" y="158" width="124" height="26" rx="3"></rect>
+          <text class="svg-t-sm" x="192" y="175" text-anchor="middle">на паузе</text>
+          <rect class="svg-box" x="266" y="158" width="104" height="26" rx="3"></rect>
+          <text class="svg-t-sm" x="318" y="175" text-anchor="middle">notes.md</text>
+
+          <text class="svg-t-edge" x="10" y="220">зависшая или приостановленная полоса не блокирует остальные</text>
+        </svg>
+        <figcaption><b>Один файл, несколько получателей.</b> Отправка файла на три подключения создаёт три независимые
+          задачи, по одной на полосу. Ошибки, повторы и паузы — на уровне полосы, поэтому мёртвый WebDAV-сервер не
+          задержит загрузку в S3. Пауза для подключения запоминается даже до того, как его полоса вообще появилась —
+          так что сценарий «поставить на паузу, затем добавить файлы» ведёт себя ожидаемо.</figcaption>
+      </figure>
+
+      <div class="prose">
+        <p>Ошибки повторяются с экспоненциальной задержкой. Задача, отменённая на лету, записывается как отменённая, а
+          не уходит обратно в retry-цикл. Большие файлы автоматически переключаются на порционный путь провайдера при
+          превышении порога 64&nbsp;МиБ — и это число намеренно ниже лимита Dropbox в 150&nbsp;МБ на один запрос,
+          потому что для этого провайдера порционная загрузка и есть то, что вообще делает большие файлы
+          возможными.</p>
+      </div>
+    </section>
+
+    <section id="providers">
+      <div class="prose">
+        <p class="eyebrow">Хранилища</p>
+        <h2>Провайдеры и чек-суммы</h2>
+        <p>Каждый провайдер реализует один маленький обязательный интерфейс. Всё, что умеют не все хранилища —
+          порционная загрузка, проверка чек-суммы, проверка существования, описание собственной формы конфига — это
+          отдельные опциональные интерфейсы, которые ядро обнаруживает через type assertion. Добавить хранилище значит
+          написать пакет и один анонимный импорт; в ядре не меняется ничего.</p>
+        <p>Самое интересное расхождение — как проверяется целостность, потому что это решение целиком отдано
+          провайдеру:</p>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Провайдер</th><th>Чек-сумма</th><th>Как проверяется</th><th>Порциями</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>webdav</code></td>
+              <td><span class="chip chip-self">своя · sha256</span></td>
+              <td>Скачивает объект заново и пересчитывает хэш</td>
+              <td class="num">—</td>
+            </tr>
+            <tr>
+              <td><code>s3</code></td>
+              <td><span class="chip chip-self">своя · sha256</span></td>
+              <td>Скачивает объект заново и пересчитывает хэш</td>
+              <td class="num">multipart</td>
+            </tr>
+            <tr>
+              <td><code>dropbox</code></td>
+              <td><span class="chip chip-self">своя · sha256</span></td>
+              <td>Скачивает объект заново и пересчитывает хэш</td>
+              <td class="num">сессии</td>
+            </tr>
+            <tr>
+              <td><code>googledrive</code></td>
+              <td><span class="chip chip-native">нативная · md5</span></td>
+              <td>Один дешёвый запрос метаданных</td>
+              <td class="num">—</td>
+            </tr>
+            <tr>
+              <td><code>b2</code></td>
+              <td><span class="chip chip-native">нативная · sha1</span></td>
+              <td>Один дешёвый запрос метаданных</td>
+              <td class="num">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="prose">
+        <p>WebDAV, S3 и Dropbox не отдают надёжный хэш содержимого, поэтому считают его сами во время загрузки и
+          проверяют, скачивая файл обратно. Google Drive и Backblaze B2 надёжный хэш публикуют, и для них проверка —
+          это запрос метаданных. Именно поэтому B2 сделан на своём нативном API, а не через S3-совместимый слой,
+          который тоже бы работал.</p>
+        <p>Для ядра эта разница невидима: все пять удовлетворяют одному интерфейсу, а метка алгоритма хранится в
+          журнале как непрозрачное значение и позже возвращается тому же провайдеру. Для случая «своя чек-сумма» метка
+          вынесена в общую константу, а не продублирована в каждом пакете — она персистится, и опечатка в четвёртой
+          копии молча наплодила бы записи истории, которые невозможно проверить.</p>
+        <p>Одна тонкость про порционную загрузку: чек-сумма обязана получиться одинаковой, ушёл файл одним запросом или
+          двадцатью. Это выполняется потому, что поток оборачивается для хэширования <em>один раз</em>, до нарезки —
+          хэш покрывает весь файл и ничего не знает о том, как его порезали для передачи.</p>
+      </div>
+    </section>
+
+    <section id="secrets">
+      <div class="prose">
+        <p class="eyebrow">Учётные данные</p>
+        <h2>Секреты и OAuth</h2>
+        <p>Два хранилища, разделённые намеренно. JSON-конфиг держит только несекретные метаданные подключения — имя,
+          тип, endpoint, бакет. Всё секретное уходит в системное хранилище ключей ОС (Windows Credential Manager,
+          macOS Keychain, Secret Service на Linux) с привязкой к подключению. В файле конфига пароля не бывает
+          никогда, а интерфейс, который видят провайдеры, доступен только для чтения — так что попытка провайдера
+          <em>записать</em> секрет просто не скомпилируется.</p>
+        <p>Google Drive, Dropbox, Yandex.Disk и OneDrive требуют интерактивного шага согласия, прежде чем подключение
+          вообще заработает, и в статическую форму это не укладывается. Такой флоу зарегистрирован на тип провайдера,
+          а не захардкожен, и поэтому API отдаёт его обобщённо: клиент спрашивает, каким типам нужен OAuth, один раз
+          задаёт для этого типа общие для приложения client credentials, а затем авторизует каждое подключение.
+          Редирект после согласия ведёт не на отдельный временный процесс, а на <code>GET /api/v1/oauth/callback</code>
+          того же REST API сервера — построенный из того же адреса, по которому браузер и так уже обращается к API,
+          поэтому работает одинаково и для локального запуска, и для удалённого сервера за reverse proxy.</p>
+        <p>Общие для приложения client id и secret лежат в хранилище ключей под псевдо-идентификатором подключения —
+          так они разделяются всеми подключениями этого типа и по-прежнему не попадают в файл конфига.</p>
+      </div>
+    </section>
+
+    <section id="history">
+      <div class="prose">
+        <p class="eyebrow">Долговечность</p>
+        <h2>Журнал загрузок</h2>
+        <p>Каждая завершённая попытка попадает в локальную таблицу SQLite: локальный путь и размер, подключение, путь
+          на хранилище, чек-сумма и метка алгоритма, время и результат. Это намеренно отделено от лога приложения —
+          здесь бизнес-данные, а не диагностика.</p>
+        <p>Смысл журнала — в перепроверке. Попросите проверить запись, и он резолвит провайдера и сообщает одно из пяти
+          состояний:</p>
+        <ul class="notes">
+          <li><code>ok</code> — на месте, содержимое совпадает.</li>
+          <li><code>missing</code> — файл удалили или переименовали на хранилище.</li>
+          <li><code>mismatch</code> — файл есть, но содержимое изменилось.</li>
+          <li><code>unverifiable</code> — этот провайдер проверить не может; нейтральный ответ, не ошибка.</li>
+          <li><code>error</code> — до хранилища не удалось дойти.</li>
+        </ul>
+        <p>Проверку можно включить автоматически после каждой успешной загрузки. По умолчанию она выключена, и не
+          случайно: для трёх провайдеров, считающих хэш сами, это означает повторное скачивание каждого загруженного
+          файла, то есть удвоение трафика. Когда включена, она идёт в отдельной горутине и не держит слот полосы.</p>
+      </div>
+    </section>
+
+    <section id="layers">
+      <div class="prose">
+        <p class="eyebrow">Ограничения</p>
+        <h2>Кто кого может импортировать</h2>
+        <p>Правило зависимостей — это то, что оставляет список хранилищ открытым, поэтому его стоит увидеть.</p>
+      </div>
+
+      <figure>
+        <svg viewBox="0 0 760 300" role="img"
+             aria-label="Зависимости направлены в одну сторону: команда сервера зависит от HTTP-слоя, тот от сервисного ядра, а ядро — только от интерфейсов провайдера и реестра. Конкретные пакеты провайдеров регистрируют себя в реестре при инициализации, и ничто в ядре их не импортирует.">
+          <defs>
+            <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="currentColor" stroke="none"></path>
+            </marker>
+            <marker id="ah2k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--accent)" stroke="none"></path>
+            </marker>
+          </defs>
+
+          <rect class="svg-box" x="150" y="14" width="300" height="46" rx="3"></rect>
+          <text class="svg-t" x="300" y="35" text-anchor="middle">cmd/server</text>
+          <text class="svg-t-sm" x="300" y="51" text-anchor="middle">флаги · трей · корректное завершение</text>
+
+          <line class="svg-line" x1="300" y1="60" x2="300" y2="82" marker-end="url(#ah2)"></line>
+
+          <rect class="svg-box" x="150" y="90" width="300" height="46" rx="3"></rect>
+          <text class="svg-t" x="300" y="111" text-anchor="middle">internal/httpapi</text>
+          <text class="svg-t-sm" x="300" y="127" text-anchor="middle">роутинг · авторизация · снепшот задач</text>
+
+          <line class="svg-line" x1="300" y1="136" x2="300" y2="158" marker-end="url(#ah2)"></line>
+
+          <rect class="svg-box" x="150" y="166" width="300" height="52" rx="3"></rect>
+          <text class="svg-t" x="300" y="187" text-anchor="middle">сервисное ядро</text>
+          <text class="svg-t-sm" x="300" y="204" text-anchor="middle">queue · history · config · secrets · settings</text>
+
+          <line class="svg-line" x1="300" y1="218" x2="300" y2="240" marker-end="url(#ah2)"></line>
+
+          <rect class="svg-box" x="150" y="248" width="300" height="46" rx="3"></rect>
+          <text class="svg-t" x="300" y="269" text-anchor="middle">provider + registry</text>
+          <text class="svg-t-sm" x="300" y="285" text-anchor="middle">только интерфейсы</text>
+
+          <rect class="svg-box-key" x="530" y="166" width="220" height="52" rx="3"></rect>
+          <text class="svg-t svg-t-key" x="640" y="187" text-anchor="middle">internal/providers/*</text>
+          <text class="svg-t-sm" x="640" y="204" text-anchor="middle">webdav s3 googledrive dropbox b2</text>
+
+          <path class="svg-line-key" d="M 640 218 L 640 271 L 458 271" marker-end="url(#ah2k)"></path>
+          <text class="svg-t-edge svg-t-key" x="640" y="240" text-anchor="middle">регистрирует себя в init()</text>
+
+          <text class="svg-t-edge" x="10" y="122">стрелки читаются</text>
+          <text class="svg-t-edge" x="10" y="138">как «зависит от»</text>
+        </svg>
+        <figcaption><b>Правило, которое держит расширяемость.</b> Ничто в ядре не импортирует конкретного провайдера, а
+          в реестре нет <code>switch</code> по типам — провайдер объявляет себя сам при старте. Единственное место, где
+          вообще фигурирует список хранилищ, — блок анонимных импортов в <code>cmd/server</code>. Забудьте этот импорт,
+          и провайдер соберётся, тесты пройдут, а для приложения его не будет существовать.</figcaption>
+      </figure>
+    </section>
+
+    <section id="api">
+      <div class="prose">
+        <p class="eyebrow">Контракт</p>
+        <h2>Поверхность API</h2>
+        <p>29 маршрутов, все кроме двух — за bearer-токеном. <code>openapi.yaml</code> — источник истины, и он обязан
+          меняться тем же коммитом, что и эндпоинт: встроенный фронтенд лишь первый клиент, а не единственный
+          разрешённый.</p>
+      </div>
+
+      <div class="routes">
+        <div class="route-group">
+          <h4>Обнаружение</h4>
+          <span class="endpoint"><b>GET</b> /healthz · <b>GET</b> /openapi.yaml</span>
+          <span class="endpoint"><b>GET</b> /api/v1/provider-types · /provider-types/{type}/schema</span>
+        </div>
+        <div class="route-group">
+          <h4>Подключения</h4>
+          <span class="endpoint"><b>GET POST</b> /api/v1/connections · <b>GET PUT DELETE</b> /connections/{id}</span>
+          <span class="endpoint"><b>POST</b> /connections/{id}/test</span>
+        </div>
+        <div class="route-group">
+          <h4>OAuth</h4>
+          <span class="endpoint"><b>GET PUT</b> /api/v1/provider-types/{type}/oauth-credentials</span>
+          <span class="endpoint"><b>POST GET</b> /api/v1/connections/{id}/oauth/authorize</span>
+        </div>
+        <div class="route-group">
+          <h4>Загрузки и очередь</h4>
+          <span class="endpoint"><b>POST</b> /api/v1/connections/{id}/uploads</span>
+          <span class="endpoint"><b>GET</b> /api/v1/tasks · /tasks/{id} · <b>POST</b> /tasks/{id}/cancel</span>
+          <span class="endpoint"><b>POST</b> /connections/{id}/pause · /resume · /cancel-all</span>
+        </div>
+        <div class="route-group">
+          <h4>История, настройки, языки</h4>
+          <span class="endpoint"><b>GET</b> /api/v1/history · /history/{id} · <b>DELETE</b> /history/{id}</span>
+          <span class="endpoint"><b>POST</b> /api/v1/history/{id}/verify</span>
+          <span class="endpoint"><b>GET PUT</b> /api/v1/settings · <b>GET</b> /api/v1/languages · /languages/{code}</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="i18n">
+      <div class="prose">
+        <p class="eyebrow">Локализация</p>
+        <h2>Языки</h2>
+        <p>Переводы отдаёт бэкенд, а не сборка фронтенда. Английский и русский вшиты в бинарник; чтобы добавить язык
+          или переопределить отдельные ключи встроенного, достаточно положить JSON-файл в папку
+          <code>languages/</code> рядом с исполняемым файлом — без пересборки ни одной из половин.</p>
+        <p>Две детали делают это приятным в использовании. Зарезервированный ключ <code>__name__</code> хранит
+          самоназвание языка, поэтому новый язык подписывает себя в переключателе без единой правки кода. А
+          недостающие ключи дополняются английскими при загрузке каталога, так что неполный перевод всегда безопасен и
+          клиенту не нужна своя логика fallback.</p>
+        <p>Почему это живёт на сервере, а не во фронтенде: фронтенд заменяем по замыслу, поэтому каталоги принадлежат
+          API. К тому же браузер не умеет листать директорию — сервер умеет.</p>
+      </div>
+    </section>
+
+    <section id="state">
+      <div class="prose">
+        <p class="eyebrow">На диске</p>
+        <h2>Где лежит состояние</h2>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Что</th><th>Где</th><th>Примечание</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Подключения</td><td class="num">&lt;UserConfigDir&gt;/cloudup/config.json</td><td>Только несекретные поля; запись атомарная</td></tr>
+            <tr><td>Учётные данные</td><td class="num">хранилище ключей ОС</td><td>Никогда на диске в открытом виде</td></tr>
+            <tr><td>Журнал загрузок</td><td class="num">&lt;UserConfigDir&gt;/cloudup/history.db</td><td>SQLite, чистый Go-драйвер, без cgo</td></tr>
+            <tr><td>Настройки</td><td class="num">&lt;UserConfigDir&gt;/cloudup/settings.json</td><td>Параллельность, проверка после загрузки, язык</td></tr>
+            <tr><td>Правила слежения</td><td class="num">&lt;UserConfigDir&gt;/cloudup/watches.json</td><td>Локальный путь → подключение; те же гарантии, что у config.json</td></tr>
+            <tr><td>Лог сервера</td><td class="num">&lt;UserConfigDir&gt;/cloudup/server.log</td><td>Только в GUI-режиме; иначе консоль</td></tr>
+            <tr><td>HTTP-лог провайдеров</td><td class="num">&lt;UserConfigDir&gt;/cloudup/debug.log</td><td>По <code>CLOUDUP_DEBUG=1</code>; значения заголовков не логирует</td></tr>
+            <tr><td>Тела в полёте</td><td class="num">os.TempDir()/cloudup-uploads</td><td>Удаляются при терминальном статусе задачи</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="edges">
+      <div class="prose">
+        <p class="eyebrow">Честный учёт</p>
+        <h2>Шероховатости</h2>
+        <p>То, что следующей сессии лучше знать, чем обнаруживать заново:</p>
+        <ul class="notes">
+          <li><strong>У файловых операций Google Drive нет интеграционных тестов.</strong> Качественного in-memory
+            фейка под wire-протокол Drive v3 не нашлось, а самодельный рискует дать ложную уверенность. Перед тем как
+            доверять — проверка на живом аккаунте.</li>
+          <li><strong>У B2 пока нет порционной загрузки.</strong> Свой large-file API у него есть; очередь начнёт им
+            пользоваться в тот момент, когда провайдер реализует интерфейс.</li>
+          <li><strong>Прокси не реализован</strong>, как и ограничение скорости загрузки и сохранение структуры папок
+            при загрузке нескольких файлов.</li>
+          <li><strong>Три вещи требуют человека.</strong> Клик по иконке в трее, автоопределение headless на реальном
+            сервере без дисплея и то, как фронтенд на самом деле рисуется — ничего из этого не проверить из
+            консоли разработчика.</li>
+        </ul>
+        <p>С другой стороны, весь набор тестов проходит многократно, а не однажды — именно это делает видимой утечку
+          состояния между прогонами; а у HTTP-слоя теперь есть тест, который падает, если какой-нибудь маршрут
+          перестанет регистрироваться. Ровно этот класс ошибки однажды позволил уехать в релиз целому OAuth-флоу
+          провайдера, подключённому в никуда.</p>
+      </div>
+    </section>
+
+    <footer>
+      <p>Подробности — в репозитории: <code>README.md</code>/<code>README.ru.md</code> для общего обзора,
+        <code>openapi.yaml</code> — контракт API.</p>
+    </footer>
+  </main>
+</div>
+</body>
+</html>

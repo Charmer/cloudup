@@ -1,0 +1,171 @@
+name: Release
+
+# Tag push (vX.Y.Z) builds every platform, packages an archive per
+# platform (binary + the built frontend + openapi.yaml, laid out so the
+# server's own -static/-openapi defaults ("frontend/dist"/"openapi.yaml",
+# both relative - see cmd/server/main.go) resolve correctly straight out
+# of the zip, no flags needed), and publishes them as release assets.
+# workflow_dispatch runs the same build+package for manual smoke-testing
+# without publishing anything - see the "release" job's `if`.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners only, deliberately no cross-compilation:
+          # fyne.io/systray needs cgo (GTK3+appindicator on Linux, Cocoa
+          # on macOS - Windows is the one platform that doesn't), and
+          # cross-compiling a cgo dependency needs a matching sysroot per
+          # target that isn't worth maintaining here.
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            archive_os: windows-amd64
+          - os: macos-latest # Apple Silicon (M-series). Intel Mac dropped
+            # deliberately - GitHub's macos-13 (Intel) runner pool queues
+            # for a long time compared to macos-latest, and Apple Silicon
+            # is the current generation.
+            goos: darwin
+            goarch: arm64
+            archive_os: darwin-arm64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            archive_os: linux-amd64
+          - os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            archive_os: linux-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # fyne.io/systray's build requirements on Linux - see its own README.
+      # libayatana-appindicator3-dev is the maintained successor to
+      # libappindicator3-dev, present on both the amd64 and arm64 Ubuntu
+      # runner images used here.
+      - name: Install Linux tray build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Windows ships two binaries in the same archive: cloudup-server.exe
+      # is built with -H=windowsgui (no console window - what most people
+      # double-clicking an app expect) and is the one referenced by
+      # default; cloudup-server-console.exe is a plain build for anyone
+      # who wants to see live log output in a terminal instead of only in
+      # server.log. See README.md's Windows build note for why the PE
+      # subsystem flag is a separate concern from -gui.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          mkdir -p stage
+          go build -ldflags "-X main.version=$VERSION" -o stage/cloudup-server-console.exe ./cmd/server
+          go build -ldflags "-X main.version=$VERSION -H=windowsgui" -o stage/cloudup-server.exe ./cmd/server
+
+      - name: Build (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CGO_ENABLED: 1
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          mkdir -p stage
+          go build -ldflags "-X main.version=$VERSION" -o stage/cloudup-server ./cmd/server
+
+      - name: Assemble archive contents
+        shell: bash
+        run: |
+          mkdir -p stage/frontend
+          cp -r frontend/dist stage/frontend/dist
+          cp openapi.yaml README.md README.ru.md LICENSE stage/
+          mkdir -p dist
+
+      # windows-latest doesn't have `zip` on PATH (unlike the macOS/Linux
+      # runner images, where it's preinstalled) - Compress-Archive is the
+      # built-in PowerShell equivalent, no extra install needed.
+      - name: Zip archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: Compress-Archive -Path stage/* -DestinationPath "dist/cloudup-$env:VERSION-${{ matrix.archive_os }}.zip"
+
+      - name: Zip archive (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: ( cd stage && zip -r "../dist/cloudup-${VERSION}-${{ matrix.archive_os }}.zip" . )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloudup-${{ matrix.archive_os }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
+          draft: true

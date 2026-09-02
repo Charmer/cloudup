@@ -1,0 +1,35 @@
+# Example headless deployment. Not build-tested against a live Docker
+# daemon in this repo's own CI - treat this as a starting point and adjust
+# rather than assuming it works unmodified for your setup.
+#
+# docker compose up -d --build
+# curl -H "Authorization: Bearer $CLOUDUP_API_TOKEN" http://127.0.0.1:3000/api/v1/connections
+
+services:
+  cloudup:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Fixed on purpose: unlike the normal (non-Docker) run, where a
+      # freshly generated token is fine because you're the one opening the
+      # browser it gets injected into, a container is typically driven by
+      # another service that needs a token it can rely on across restarts.
+      # Set this to a real random value - see README.md's -cors-origin
+      # section for why nothing here is a shared secret's replacement.
+      CLOUDUP_API_TOKEN: change-me-to-a-long-random-value
+    volumes:
+      # cloudup's own state (connections, history.db, settings, watch
+      # rules) lives in a "data" folder next to the binary (/app - see
+      # internal/appdir and Dockerfile's WORKDIR); the container-local
+      # keyring (see docker/entrypoint.sh) stores its file separately,
+      # under ~/.local/share/keyrings - both need to survive a restart, or
+      # every provider's stored password/OAuth token vanishes even though
+      # the connection entry referencing it is still there.
+      - cloudup-config:/app/data
+      - cloudup-keyring:/root/.local/share/keyrings
+    restart: unless-stopped
+
+volumes:
+  cloudup-config:
+  cloudup-keyring:

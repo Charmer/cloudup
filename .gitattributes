@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings regardless of core.autocrlf on the
+# checkout machine - a CRLF shebang line breaks exec() inside the Linux
+# container docker/entrypoint.sh runs in (see Dockerfile).
+*.sh text eol=lf

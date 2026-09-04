@@ -69,6 +69,8 @@ Uploader is a single application that:
 | **Backblaze B2** | native b2api v2 — server-side SHA1 makes checksum verification a cheap metadata read |
 | **Yandex.Disk** | native REST API v1, OAuth2 — server-side MD5 makes checksum verification a cheap metadata read, unlike its generic WebDAV interface |
 | **OneDrive / SharePoint** | OAuth2 (Microsoft Graph API v1.0) — optional `driveId` targets a specific SharePoint document library instead of the personal drive |
+| **FTP** | RFC 959, with optional explicit TLS (FTPS) for servers that require an encrypted channel |
+| **SFTP** | SSH File Transfer Protocol — password authentication only for now, host key checking not yet implemented (see "Known gaps" below) |
 
 Adding another backend means implementing one interface
 (`provider.Provider`, see
@@ -79,7 +81,7 @@ in a new package — the queue, history, and REST API code never change.
 
 **Everything below is implemented and tested.**
 
-- ✅ **Core** — provider interfaces, seven storage backends, secrets, config,
+- ✅ **Core** — provider interfaces, nine storage backends, secrets, config,
   SQLite history, upload queue with retry/pause/cancel, local folder
   watching.
 - ✅ **REST API** (`internal/httpapi`, `cmd/server`) — connections, uploads,
@@ -103,6 +105,9 @@ in a new package — the queue, history, and REST API code never change.
   (folder auto-vivification, chunk-size boundaries, download redirect
   format) are implemented from the official docs but not yet confirmed
   against a real Azure AD app registration.
+- `internal/providers/sftp` does not verify the server's host key (no
+  known_hosts-style store or UI to pin/confirm a fingerprint exists yet), and
+  authenticates by password only — public-key auth isn't wired in.
 - A handful of manual-only checks remain undone: real clicks on the system
   tray icon, a `-H=windowsgui` build, and real headless auto-detection over
   SSH.

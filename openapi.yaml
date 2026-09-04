@@ -950,9 +950,9 @@ components:
             same choice applies to every connection of that type. A type
             absent from the object defaults to off - the cost varies a lot
             per provider (a cheap metadata read for googledrive/b2/
-            yandexdisk/onedrive, a full re-download for webdav/s3/dropbox,
-            which have no reliable native hash), which is exactly why this
-            is per-type instead of one global switch.
+            yandexdisk/onedrive, a full re-download for webdav/s3/dropbox/
+            ftp/sftp, which have no reliable native hash), which is exactly
+            why this is per-type instead of one global switch.
           type: object
           additionalProperties:
             type: boolean

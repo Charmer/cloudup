@@ -90,7 +90,7 @@ const allProviderTypes = ref([])
 // CONTRIBUTING.md's "Every provider decides its own checksum strategy"
 // section, which is the source of truth for *why* each type is listed
 // here or not.
-const expensiveVerifyTypes = ['webdav', 's3', 'dropbox']
+const expensiveVerifyTypes = ['webdav', 's3', 'dropbox', 'ftp', 'sftp']
 
 async function loadProviderTypes() {
   try {

@@ -114,10 +114,10 @@ expect for which provider.
 
 ### Every provider decides its own checksum strategy
 
-WebDAV servers, most S3-compatible storages and Dropbox don't reliably
-expose a trustworthy content hash, so those providers compute their own
-SHA-256 while streaming the upload, and verify later by re-downloading and
-re-hashing. Google Drive, Backblaze B2 and Yandex.Disk, on the other hand,
+WebDAV servers, most S3-compatible storages, Dropbox, FTP and SFTP don't
+reliably expose a trustworthy content hash, so those providers compute their
+own SHA-256 while streaming the upload, and verify later by re-downloading
+and re-hashing. Google Drive, Backblaze B2 and Yandex.Disk, on the other hand,
 reliably return a native hash in their file metadata (`md5Checksum`, SHA1
 and `md5` respectively), so their `VerifyChecksum` is a cheap metadata call
 instead. The core doesn't know or care which strategy a given provider
@@ -131,8 +131,8 @@ The user-facing "verify checksum after upload" setting
 (`Settings.VerifyChecksumAfterUpload`) is a plain `map[string]bool` keyed by
 provider type — the backend stores and applies it without knowing or caring
 which types are cheap vs. expensive to verify. That classification (the same
-WebDAV/S3/Dropbox re-download vs. Drive/B2/Yandex.Disk metadata-call split
-described above) is deliberately kept out of Go entirely and instead lives as
+WebDAV/S3/Dropbox/FTP/SFTP re-download vs. Drive/B2/Yandex.Disk metadata-call
+split described above) is deliberately kept out of Go entirely and instead lives as
 a small hardcoded `expensiveVerifyTypes` array in `SettingsView.vue`, shown
 next to each checkbox as a plain hint string. Keep that array and this
 section in sync when a provider's checksum strategy changes or a new
@@ -213,6 +213,8 @@ internal/
     b2/                 Backblaze B2 native API, streaming upload with trailing SHA1, ParallelMultipartUploader.
     yandexdisk/         Yandex.Disk REST API v1, OAuth2, native MD5 metadata checksum.
     onedrive/           Microsoft Graph API v1.0, OAuth2, native quickXorHash metadata checksum.
+    ftp/                FTP (RFC 959), optional explicit TLS (FTPS), self-computed SHA-256 checksum.
+    sftp/               SFTP over SSH, password auth, self-computed SHA-256 checksum.
   streamio/             Shared progress-reporting io.Reader/io.Writer wrappers.
   secrets/              OS keychain-backed SecretStore implementation.
   config/               JSON connection config store (non-secret fields only).

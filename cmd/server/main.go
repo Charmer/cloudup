@@ -58,9 +58,11 @@ import (
 
 	_ "cloudup/internal/providers/b2"
 	_ "cloudup/internal/providers/dropbox"
+	_ "cloudup/internal/providers/ftp"
 	_ "cloudup/internal/providers/googledrive"
 	_ "cloudup/internal/providers/onedrive"
 	_ "cloudup/internal/providers/s3"
+	_ "cloudup/internal/providers/sftp"
 	_ "cloudup/internal/providers/webdav"
 	_ "cloudup/internal/providers/yandexdisk"
 )
